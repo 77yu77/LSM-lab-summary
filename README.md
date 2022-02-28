@@ -20,5 +20,13 @@ LSM tree键值存储系统分为内存存储和硬盘存储两部分。<br>
 3. 内存中缓存 SSTable 的 Bloom Filter 和索引，先通过 Bloom Filter判断一个键值是否可能在一个 SSTable 中，如果存在再利用二分查找，否则直接查看下一个 SSTable 的索引<br>
 数据如下：<br>
  ![data3](https://github.com/77yu77/LSM-lab-summary/blob/main/picture/data3.jpg "data3")<br>
- 通过不在内存存 SSTable，采用二分法于使用 Bloom Filter 三者对比，可以看出在磁盘读 offset 时 Get 时间非常慢，而将 SSTable 存在内存以及二分法效率比较高，性能提升非常大，采用 Bloom Filter 在一定程度上提高 Get 速度,而在这里不明显的原因可能是数据量不够大，还有就是SSTable比较小，只有2MB,而测试时每个value接近1KB，导致存的数据量比较小，所以二分查找会比较快。
-
+ 通过不在内存存 SSTable，采用二分法于使用 Bloom Filter 三者对比，可以看出在磁盘读 offset 时 Get 时间非常慢，而将 SSTable 存在内存以及二分法效率比较高，性能提升非常大，采用 Bloom Filter 在一定程度上提高 Get 速度,而在这里不明显的原因可能是数据量不够大，还有就是SSTable比较小，只有2MB,而测试时每个value接近1KB，导致存的数据量比较小，而且SSTable的数量较少也会导致布隆过滤器效果不是很明显，所以二分查找会比较快。
+## 调研LevelDB的实现与优化
+### SSTable方面
+LevelDB的SST文件由若干个4K大小的blocks组成，block也是读/写操作的最小单元，这样有利于读写操作；<br>
+SST文件的最后一个block是一个index，指向每个data block的起始位置，以及每个block第一个entry的key值（block内的key有序存储）,而我则是放在起始位置，放在前面查找更方便。<br>
+同一个block内的key可以共享前缀（只存储一次），这样每个key只要存储自己唯一的后缀就行了。如果block中只有部分key需要共享前缀，在这部分key与其它key之间插入"reset"标识。(猜想这是因为同一个block的key相关性比较强，很多会出现相同的前缀，比如按顺序存储的话一般只有后几位改变)<br>
+### cache
+读取操作如果没有在内存的memtable中找到记录，要多次进行磁盘访问操作,所以LevelDb中引入了两个不同的Cache:Table Cache和Block Cache.<br>
+如果levelDb确定了key在某个level下某个文件A的key range范围内,那么levelDb会首先查找Table Cache，看这个文件是否在缓存里，没有再去打开SSTable文件，并将其index部分读入内存，然后插入Cache里面，去index里面定位哪个block包含这个Key.
+Block Cache是为了加快这个过程的，其中的key是文件的cache_id加上这个block在文件中的起始位置block_offset。而value则是这个Block的内容，如果levelDb发现这个block在block cache中，那么可以避免读取数据，直接在cache里的block内容里面查找key的value就行，如果没找到，那么读入block内容并把它插入block cache中.
