@@ -22,11 +22,18 @@ LSM tree键值存储系统分为内存存储和硬盘存储两部分。<br>
  ![data3](https://github.com/77yu77/LSM-lab-summary/blob/main/picture/data3.jpg "data3")<br>
  通过不在内存存 SSTable，采用二分法于使用 Bloom Filter 三者对比，可以看出在磁盘读 offset 时 Get 时间非常慢，而将 SSTable 存在内存以及二分法效率比较高，性能提升非常大，采用 Bloom Filter 在一定程度上提高 Get 速度,而在这里不明显的原因可能是数据量不够大，还有就是SSTable比较小，只有2MB,而测试时每个value接近1KB，导致存的数据量比较小，而且SSTable的数量较少也会导致布隆过滤器效果不是很明显，所以二分查找会比较快。
 ## 调研LevelDB的实现与优化
+### operation log 系统
+Leveldb基于operation log，由于采用了op log，它就可以把随机的磁盘写操作，变成了对op log的append操作，因此提高了IO效率，最新的数据则存储在内存memtable中。当op log文件大小超过限定值时，就定时做check point。Leveldb会生成新的Log文件和Memtable，后台调度会将Immutable Memtable的数据导出到磁盘，形成一个新的SSTable文件。<br>
 ### SSTable方面
 LevelDB的SST文件由若干个4K大小的blocks组成，block也是读/写操作的最小单元，这样有利于读写操作；<br>
 SST文件的最后一个block是一个index，指向每个data block的起始位置，以及每个block第一个entry的key值（block内的key有序存储）,而我则是放在起始位置，放在前面查找更方便。<br>
 同一个block内的key可以共享前缀（只存储一次），这样每个key只要存储自己唯一的后缀就行了。如果block中只有部分key需要共享前缀，在这部分key与其它key之间插入"reset"标识。(猜想这是因为同一个block的key相关性比较强，很多会出现相同的前缀，比如按顺序存储的话一般只有后几位改变)<br>
 ### cache
-读取操作如果没有在内存的memtable中找到记录，要多次进行磁盘访问操作,所以LevelDb中引入了两个不同的Cache:Table Cache和Block Cache.<br>
-如果levelDb确定了key在某个level下某个文件A的key range范围内,那么levelDb会首先查找Table Cache，看这个文件是否在缓存里，没有再去打开SSTable文件，并将其index部分读入内存，然后插入Cache里面，去index里面定位哪个block包含这个Key.
-Block Cache是为了加快这个过程的，其中的key是文件的cache_id加上这个block在文件中的起始位置block_offset。而value则是这个Block的内容，如果levelDb发现这个block在block cache中，那么可以避免读取数据，直接在cache里的block内容里面查找key的value就行，如果没找到，那么读入block内容并把它插入block cache中.
+读取操作如果没有在内存的memtable中找到记录，要多次进行磁盘访问操作,所以LevelDb中引入了两个不同的LRUCache:Table Cache和Block Cache.<br>
+如果levelDb确定了key在某个level下某个文件A的key range范围内,那么levelDb会首先查找Table Cache，看这个文件是否在缓存里，没有再去打开SSTable文件，并将其index部分读入内存，然后插入Cache里面，去index里面定位哪个block包含这个Key.<br>
+Block Cache是为了加快这个过程的，其中的key是文件的cache_id加上这个block在文件中的起始位置block_offset。而value则是这个Block的内容，如果levelDb发现这个block在block cache中，那么可以避免读取数据，直接在cache里的block内容里面查找key的value就行，如果没找到，那么读入block内容并把它插入block cache中.<br>
+具体对Cache进行分析：<br>
+leveldb中的Cache主要用到了双向链表、哈希表和LRU（least recently used）思想。<br>
+LRUHandle表示了Cache中的每一个元素，通过指针形成一个双向循环链表,LRUHandle 结构将hash值相同的所有元素串联成一个双向循环链表，通过指针next_hash来解决hash 碰撞.<br>
+leveldb通过HandleTable维护一个哈希表,哈希表中包含对LRUHandle的查询、插入与删除。<br>
+LRUCache顾名思义是指一个缓存，同时它用到了LRU的思想,LRUCache维护了一个双向循环链表lru_和一个hash表table，当要插入一个元素时，首先将其插入到链表lru的尾部，然后根据hash值将其插入到hash表中。当hash表中已存在hash值与要插入元素的hash值相同的元素时，将原有元素从链表中移除，这样就可以保证最近使用的元素在链表的最尾部，这也意味着最近最少使用的元素在链表的头部，这样即可实现LRU的思想。
