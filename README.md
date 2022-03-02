@@ -37,3 +37,16 @@ leveldb中的Cache主要用到了双向链表、哈希表和LRU（least recently
 LRUHandle表示了Cache中的每一个元素，通过指针形成一个双向循环链表,LRUHandle 结构将hash值相同的所有元素串联成一个双向循环链表，通过指针next_hash来解决hash 碰撞.<br>
 leveldb通过HandleTable维护一个哈希表,哈希表中包含对LRUHandle的查询、插入与删除。<br>
 LRUCache顾名思义是指一个缓存，同时它用到了LRU的思想,LRUCache维护了一个双向循环链表lru_和一个hash表table，当要插入一个元素时，首先将其插入到链表lru的尾部，然后根据hash值将其插入到hash表中。当hash表中已存在hash值与要插入元素的hash值相同的元素时，将原有元素从链表中移除，这样就可以保证最近使用的元素在链表的最尾部，这也意味着最近最少使用的元素在链表的头部，这样即可实现LRU的思想。
+## RocksDB的实现与优化
+### 结构示意图
+
+### 增加了column family，有了列簇的概念，可把一些相关的key存储在一起
+每个column familyl的memtable与sstable都是分开的，所以每一个column family都可以单独配置，所有column family共用同一个WAL log文件，可以保证跨column family写入时的原子性.Column Family主要是提供给RocksDB一个逻辑的分区.Column Families 背后的主要思想是它们WAL log文件，而不共享内存表和表文件。通过共享WAL log文件，我们获得了原子写入的巨大好处。通过分离 memtables 和 table 文件，我们可以独立配置列族并快速删除它们。
+### 内存中 max_write_buffer_number的设置
+在刷新到 SST 文件之前，内存中建立的最大内存表数，默认为2，
+### 支持并发插入
+### HashSkiplist MemTable
+HashSkipList 将数据组织在一个哈希表中，每个哈希桶作为一个Skiplist，而 HashLinkList 将数据组织在一个哈希表中，每个哈希桶作为一个排序的单链表。这两种类型都是为了减少查询时的比较次数而构建的。<br>
+
+参考：<br>
+https://github.com/facebook/rocksdb
