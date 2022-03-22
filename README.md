@@ -21,9 +21,9 @@ LSM tree键值存储系统分为内存存储和硬盘存储两部分。<br>
 数据如下：<br>
  ![data3](https://github.com/77yu77/LSM-lab-summary/blob/main/picture/data3.jpg "data3")<br>
  通过不在内存存 SSTable，采用二分法于使用 Bloom Filter 三者对比，可以看出在磁盘读 offset 时 Get 时间非常慢，而将 SSTable 存在内存以及二分法效率比较高，性能提升非常大，采用 Bloom Filter 在一定程度上提高 Get 速度,而在这里不明显的原因可能是数据量不够大，还有就是SSTable比较小，只有2MB,而测试时每个value接近1KB，导致存的数据量比较小，而且SSTable的数量较少也会导致布隆过滤器效果不是很明显，所以二分查找会比较快。
-## 调研LevelDB的实现与优化
-### operation log 系统
-Leveldb基于operation log，由于采用了op log，它就可以把随机的磁盘写操作，变成了对op log的append操作，因此提高了IO效率，最新的数据则存储在内存memtable中。当op log文件大小超过限定值时，就定时做check point。Leveldb会生成新的Log文件和Memtable，后台调度会将Immutable Memtable的数据导出到磁盘，形成一个新的SSTable文件。<br>
+## 调研LevelDB的实现
+### log日志
+leveldb的写操作并不是直接写入磁盘的，而是首先写入到内存。假设写入到内存的数据还未来得及持久化，leveldb进程发生了异常，抑或是宿主机器发生了宕机，会造成用户的写入发生丢失。因此leveldb在写内存之前会首先将所有的写操作写到日志文件中，也就是log文件。当 log文件大小超过限定值时，就定时做check point。Leveldb会生成新的Log文件和Memtable，后台调度会将Immutable Memtable的数据导出到磁盘，形成一个新的SSTable文件。<br>
 ### SSTable方面
 LevelDB的SST文件由若干个4K大小的blocks组成，block也是读/写操作的最小单元，这样有利于读写操作；<br>
 SST文件的最后一个block是一个index，指向每个data block的起始位置，以及每个block第一个entry的key值（block内的key有序存储）,而我则是放在起始位置，放在前面查找更方便。<br>
@@ -36,7 +36,15 @@ Block Cache是为了加快这个过程的，其中的key是文件的cache_id加�
 leveldb中的Cache主要用到了双向链表、哈希表和LRU（least recently used）思想。<br>
 LRUHandle表示了Cache中的每一个元素，通过指针形成一个双向循环链表,LRUHandle 结构将hash值相同的所有元素串联成一个双向循环链表，通过指针next_hash来解决hash 碰撞.<br>
 leveldb通过HandleTable维护一个哈希表,哈希表中包含对LRUHandle的查询、插入与删除。<br>
-LRUCache顾名思义是指一个缓存，同时它用到了LRU的思想,LRUCache维护了一个双向循环链表lru_和一个hash表table，当要插入一个元素时，首先将其插入到链表lru的尾部，然后根据hash值将其插入到hash表中。当hash表中已存在hash值与要插入元素的hash值相同的元素时，将原有元素从链表中移除，这样就可以保证最近使用的元素在链表的最尾部，这也意味着最近最少使用的元素在链表的头部，这样即可实现LRU的思想。
+LRUCache顾名思义是指一个缓存，同时它用到了LRU的思想,LRUCache维护了一个双向循环链表lru_和一个hash表table,当要插入一个元素时，首先将其插入到链表lru的尾部，然后根据hash值将其插入到hash表中。当hash表中已存在hash值与要插入元素的hash值相同的元素时，将原有元素从链表中移除，这样就可以保证最近使用的元素在链表的最尾部，这也意味着最近最少使用的元素在链表的头部，这样即可实现LRU的思想。
+## 从LevelDB中的收获与优化
+### 添加写操作的log日志
+当每次发生写操作时，先将操作写到log文件进行持久化，新启一个线程对log文件进行大小检测，当log文件超过2MB时进行快照生成，独立的一个快照文件。此时有个问题就是当生成快照期间可能会对log文件进行写入，导致出现错误，这边使用了互斥锁，写log操作和生成快照申请互斥锁（lock以及）。
+### SSTable优化
+项目的SSTable是在前面存放header，布隆过滤器和索引offset，这样会导致一个问题就是当确定索引offset时，由于我是连续空间的存储，取出来也是数组取出，那在合并产生新的SSTable的时候，归并排序一次产生一个键值对，无法立刻生成索引，因为如果直接放在数组里面，每次插入新的键值会使得所有已存放键值的offset向后移，所以得等达到2MB大小的键值及元数据后才能确定元数据大小，进而确定offset，产生多余的操作，而且在查找数据的时候也需要加上元数据长度这一段。
+###  cache优化
+通过链表做了定长度的LRU cache，再通过hash表存对应节点的位置以及key值（方便匹配），hash表采用链表哈希实现。每次满长度就将链表头删除，插入链表尾，所以要记录链表头与尾。
+
 ## RocksDB的实现与优化
 ### 增加了column family，有了列簇的概念，可把一些相关的key存储在一起
 每个column familyl的memtable与sstable都是分开的，所以每一个column family都可以单独配置，所有column family共用同一个WAL log文件，可以保证跨column family写入时的原子性.Column Family主要是提供给RocksDB一个逻辑的分区.Column Families 背后的主要思想是它们WAL log文件，而不共享内存表和表文件。通过共享WAL log文件，我们获得了原子写入的巨大好处。通过分离 memtables 和 table 文件，我们可以独立配置列族并快速删除它们。
